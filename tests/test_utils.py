@@ -7,7 +7,7 @@ from hypothesis import given
 
 
 def test_growing_result():
-    @strax.growing_result(np.int, chunk_size=2)
+    @strax.utils.growing_result(np.int, chunk_size=2)
     def bla(_result_buffer=None, result_dtype=None):
         buffer = _result_buffer
         offset = 0
@@ -34,7 +34,7 @@ def test_growing_result():
 
 @given(sorted_intervals, disjoint_sorted_intervals)
 def test_fully_contained_in(things, containers):
-    result = strax.fully_contained_in(things, containers)
+    result = strax.utils.fully_contained_in(things, containers)
 
     assert len(result) == len(things)
     if len(result):

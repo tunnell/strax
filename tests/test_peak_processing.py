@@ -5,6 +5,7 @@ from hypothesis import given
 import hypothesis.strategies as st
 
 import strax
+import strax.processing as sp
 
 
 @given(fake_hits,
@@ -12,12 +13,12 @@ import strax
        st.one_of(st.just(0), st.just(3)))
 def test_find_peaks(hits, min_hits, min_area):
     gap_threshold = 10
-    peaks = strax.find_peaks(hits,
-                             to_pe=np.ones(1),
-                             right_extension=0, left_extension=0,
-                             gap_threshold=gap_threshold,
-                             min_hits=min_hits,
-                             min_area=min_area)
+    peaks = sp.find_peaks(hits,
+                          to_pe=np.ones(1),
+                          right_extension=0, left_extension=0,
+                          gap_threshold=gap_threshold,
+                          min_hits=min_hits,
+                          min_area=min_area)
     # Check sanity
     assert np.all(peaks['length'] > 0)
 
@@ -31,7 +32,7 @@ def test_find_peaks(hits, min_hits, min_area):
     if min_area == 0 and min_hits == 1:
 
         assert np.sum(peaks['n_hits']) == len(hits)
-        assert np.all(strax.fully_contained_in(hits, peaks) > -1)
+        assert np.all(strax.utils.fully_contained_in(hits, peaks) > -1)
 
     # Since no extensions, peaks must be at least gap_threshold apart
     starts = peaks['time']
@@ -56,7 +57,7 @@ def test_sum_waveform(records, peak_left, peak_length):
     p['length'] = peak_length
     p['dt'] = 0
 
-    strax.sum_waveform(peaks, records, np.ones(n_ch))
+    sp.sum_waveform(peaks, records, np.ones(n_ch))
 
     # Area measures must be consistent
     area = p['area']

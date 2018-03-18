@@ -33,7 +33,7 @@ def save_to_dir(source, dirname, compressor='blosc'):
         strax.save(fn, x, compressor=compressor, **metadata)
 
 
-def chunk_files(dn):
+def file_names(dn):
     """Return sorted list of strax chunk file name in directory dn
     without file extension (so ready from strax.load)
     """
@@ -43,9 +43,9 @@ def chunk_files(dn):
     return [os.path.splitext(f)[0] for f in files]
 
 
-def read_chunks(dn, desc=None, **kwargs):
+def read_files(dn, desc=None, **kwargs):
     """Iteratively read strax chunk files in directory path dn"""
-    it = chunk_files(dn)
+    it = file_names(dn)
     if desc is not None:
         # Add progress bar
         it = tqdm(it, desc=desc)
@@ -62,7 +62,7 @@ def get_chunk_starts(dn):
         return np.load(info_fn)
 
     chunk_starts = np.array([strax.load_metadata(fn)['first_time']
-                             for fn in chunk_files(dn)],
+                             for fn in file_names(dn)],
                             dtype=np.int64)
     np.save(info_fn, chunk_starts)
     return chunk_starts
@@ -70,7 +70,7 @@ def get_chunk_starts(dn):
 
 def slurp(dn):
     """Return concatenated array with data of all chunks in dn"""
-    return np.concatenate(list(read_chunks(dn)))
+    return np.concatenate(list(read_files(dn)))
 
 
 def slurp_df(dn):

@@ -2,11 +2,12 @@ import numpy as np
 from hypothesis import given
 
 import strax
+import strax.processing as sp
 from .helpers import single_fake_pulse
 
 
 def _find_hits(r):
-    hits = strax.find_hits(r, threshold=0)
+    hits = sp.find_hits(r, threshold=0)
     # Test pulses have dt=1 and time=0
     # TODO: hm, maybe this doesn't test everything
     np.testing.assert_equal(hits['time'], hits['left'])

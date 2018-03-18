@@ -1,6 +1,13 @@
 """Plugin system for strax
 
-A 'plugin' is something that outputs an array and gets arrays
+Using this plugin system is entirely optional; the strax.processing
+functions work fine without it.
+
+The primary use case is supporting higher-level analyses
+beyond what the strax.processing functions do (e.g.  peak classification,
+position reconstruction, event building, etc.).
+
+In this system, a 'plugin' is something that outputs an array and gets arrays
 from one or more other plugins.
 """
 import inspect
@@ -109,14 +116,14 @@ class StraxPlugin:
         master_iter = None
         for d in self.depends_on:
             dn = os.path.join(input_dir, d)
-            it = strax.io_chunked.read_chunks(dn)
+            it = strax.io_chunked.read_files(dn)
             if d != master:
                 pacers[d] = chunk_arrays.ChunkPacer(it)
                 continue
 
             master_iter = it
             if pbar:
-                n_chunks = len(strax.io_chunked.chunk_files(dn))
+                n_chunks = len(strax.io_chunked.file_names(dn))
                 desc = f"Computing {self.provides} of {input_dir}"
                 master_iter = iter(tqdm(master_iter,
                                         total=n_chunks,
