@@ -7,19 +7,24 @@ language: python
 
 # Caching the Python dependencies speeds up builds and lightens
 # the load on TravisCI
-cache: pip  
+#cache: pip  
 
 # Everything should work in userspace
 sudo: false
 
 matrix:
   - include:
-    - python: "3.6"
-    - python: "3.7-dev"
-    - python: "3.8-dev"
+    - python: 3.6
+      env: PYTHON=3.6
+    - python: 3.7-dev
+      env: PYTHON=3.7-dev
+    - python: 3.8-dev
+      env: PYTHON=3.8-dev
   - allow_failures:  # Allow some to fail so we know when they do work!
-    - python: "3.7-dev"
-    - python: "3.8-dev"
+    - python: 3.7-dev
+      env: PYTHON=3.7-dev
+    - python: 3.8-dev
+      env: PYTHON=3.8-dev
 
 install:
   - pip install -r requirements.txt
