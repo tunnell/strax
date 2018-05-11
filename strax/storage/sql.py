@@ -27,7 +27,12 @@ class SQLLiteStore(Store):
         super().__init__(*args, **kwargs)
 
         self.filename = 'strax.db'
+        from psycopg2.extensions import register_adapter, AsIs
+        import numpy as np
 
+        for typ in ['int8', 'int16', 'int32', 'int64',
+                    'float16', 'float32', 'float64', 'float128']:
+            register_adapter(np.__getattribute__(typ), AsIs)
         self.connection = sqlite3.connect(self.filename)
 
         if 'metadata' not in self._get_tables():
@@ -90,6 +95,12 @@ class SQLLiteSaver(Saver):
         super().__init__(key, metadata)
         self.filename = filename
         self.connection = sqlite3.connect(self.filename)
+        from psycopg2.extensions import register_adapter, AsIs
+        import numpy as np
+
+        for typ in ['int8', 'int16', 'int32', 'int64',
+                    'float16', 'float32', 'float64', 'float128']:
+            register_adapter(np.__getattribute__(typ), AsIs)
         self.md['chunks'] = {}
 
     def _save_chunk(self, data, chunk_info):
