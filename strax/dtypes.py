@@ -7,9 +7,10 @@ TODO: file numba issue.
 import numpy as np
 
 __all__ = ('interval_dtype record_dtype hit_dtype peak_dtype '
-           'DIGITAL_SUM_WAVEFORM_CHANNEL').split()
+           'DIGITAL_SUM_WAVEFORM_CHANNEL DEFAULT_RECORD_LENGTH').split()
 
 DIGITAL_SUM_WAVEFORM_CHANNEL = -1
+DEFAULT_RECORD_LENGTH = 110
 
 
 # Base dtype for interval-like objects (pulse, peak, hit)
@@ -29,7 +30,7 @@ interval_dtype = [
 ]
 
 
-def record_dtype(samples_per_record=110):
+def record_dtype(samples_per_record=DEFAULT_RECORD_LENGTH):
     """Data type for a waveform record.
 
     Length can be shorter than the number of samples in data,
@@ -45,7 +46,7 @@ def record_dtype(samples_per_record=110):
             'record_i'), np.int16),
         (('Baseline in ADC counts. data = int(baseline) - data_orig',
             'baseline'), np.float32),
-        (('Level of data reduction applies (strax.ReductionLevel enum)',
+        (('Level of data reduction applied (strax.ReductionLevel enum)',
             'reduction_level'), np.uint8),
         # Note this is defined as a SIGNED integer, so we can
         # still represent negative values after subtracting baselines
@@ -71,6 +72,9 @@ def peak_dtype(n_channels=100, n_sum_wv_samples=200, n_widths=11):
     """Data type for peaks - ranges across all channels in a detector
     Remember to set channel to -1 (todo: make enum)
     """
+    if n_channels == 1:
+        raise ValueError("Must have more than one channel")
+        # Otherwise array changes shape?? badness ensues
     return interval_dtype + [
         (('Integral across channels in photoelectrons',
             'area'), np.float32),

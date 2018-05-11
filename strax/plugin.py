@@ -3,121 +3,114 @@
 A 'plugin' is something that outputs an array and gets arrays
 from one or more other plugins.
 """
+from concurrent.futures import wait
+from enum import IntEnum
+import itertools
 from functools import partial
-import inspect
-import os
-import re
+import typing
 
 import numpy as np
-import pandas as pd
 
 import strax
-import strax.chunk_arrays as ca
-
-__all__ = ('register_plugin provider data_info '
-           'StraxPlugin MergePlugin LoopPlugin').split()
+export, __all__ = strax.exporter()
 
 
-##
-# Plugin registry
-# This global dict tracks which plugin provides which data
-##
+@export
+class SaveWhen(IntEnum):
+    """Plugin's preference for having it's data saved"""
+    NEVER = 0         # Throw an error if the user lists it
+    EXPLICIT = 1      # Save ONLY if the user lists it explicitly
+    TARGET = 2        # Save if the user asks for it as a final target
+    ALWAYS = 3        # Save even if the user does not list it
 
-REGISTRY = dict()
 
+@export
+class Plugin:
+    """Plugin containing strax computation
 
-def register_plugin(plugin_class, provides=None):
-    """Register plugin_class as provider for plugin_class.provides and
-    other data types listed in provides.
-    :param plugin_class: class inheriting from StraxPlugin
-    :param provides: list of additional data types which this plugin provides.
+    You should NOT instantiate plugins directly.
+    Do NOT add unpickleable things (e.g. loggers) as attributes.
     """
-    if provides is None:
-        provides = []
-    global REGISTRY
-    inst = plugin_class()
-    for p in [inst.provides] + provides:
-        REGISTRY[p] = inst
-    return plugin_class
-
-
-def provider(data_name):
-    """Return instance of plugin that provides data_name"""
-    try:
-        return REGISTRY[data_name]
-    except KeyError:
-        raise KeyError(f"No plugin registered that provides {data_name}")
-
-
-def data_info(data_name):
-    """Return pandas DataFrame describing fields in data_name"""
-    p = provider(data_name)
-    display_headers = ['Field name', 'Data type', 'Comment']
-    result = []
-    for name, dtype in strax.utils.unpack_dtype(p.dtype):
-        if isinstance(name, tuple):
-            title, name = name
-        else:
-            title = ''
-        result.append([name, dtype, title])
-    return pd.DataFrame(result, columns=display_headers)
-
-
-##
-# Base plugin
-##
-
-class StraxPlugin:
+    __version__ = '0.0.0'
     data_kind: str
     depends_on: tuple
     provides: str
-    compressor: str = 'blosc'       # Compressor to use for files
+
+    compressor = 'blosc'
+
+    rechunk_on_save = True    # Saver is allowed to rechunk
+    rechunk_input = False
+
+    save_when = SaveWhen.ALWAYS
+    parallel = False    # If True, compute() work is submitted to pool
+    save_meta_only = False
+
+    # These are set on plugin initialization, which is done in the core
+    run_id: str
+    config: typing.Dict
+    deps: typing.List       # Dictionary of dependency plugin instances
+    takes_config = dict()       # Config options
+    compute_takes_chunk_i = False    # Autoinferred, no need to set yourself
 
     def __init__(self):
-        self.dtype = np.dtype(self.dtype)
-
         if not hasattr(self, 'depends_on'):
-            # Infer dependencies from self.compute's argument names
-            process_params = inspect.signature(self.compute).parameters.keys()
-            process_params = [p for p in process_params if p != 'kwargs']
-            self.depends_on = tuple(process_params)
+            raise ValueError('depends_on not provided for '
+                             f'{self.__class__.__name__}')
+        self.post_compute = []
+        self.on_close = []
+        if self.rechunk_input and self.parallel:
+            raise RuntimeError("Plugins that rechunk their input "
+                               "cannot be parallelized")
 
-        if not hasattr(self, 'data_kind'):
-            # Assume data kind is the same as the first dependency
-            self.data_kind = provider(self.depends_on[0]).data_kind
+    def startup(self):
+        """Hook if plugin wants to do something after initialization."""
+        pass
 
-        if not hasattr(self, 'provides'):
-            # No output name specified: construct one from the class name
-            snake_name = camel_to_snake(self.__class__.__name__)
-            self.provides = snake_name
+    def infer_dtype(self):
+        """Return dtype of computed data;
+        used only if no dtype attribute defined"""
+        raise NotImplementedError
 
-    def get(self, data_dir):
-        """Iterate over results from data_dir. If they do not exist,
-        process them."""
-        out_dir = os.path.join(data_dir, self.provides)
-        if os.path.exists(out_dir):
-            print(f"{self.provides} already exists, yielding")
-            yield from strax.io_chunked.read_chunks(out_dir)
-        else:
-            print(f"{self.provides} does not exist, processing")
-            yield from self.iter(data_dir)
+    def version(self, run_id=None):
+        """Return version number applicable to the run_id.
+        Most plugins just have a single version (in .__version__)
+        but some may be at different versions for different runs
+        (e.g. time-dependent corrections).
+        """
+        return self.__version__
 
-    def dependencies_by_kind(self, require_time=True):
+    def metadata(self, run_id):
+        """Metadata to save along with produced data"""
+        return dict(
+            run_id=run_id,
+            data_type=self.provides,
+            data_kind=self.data_kind,
+            dtype=self.dtype,
+            compressor=self.compressor,
+            lineage=self.lineage)
+
+    def dependencies_by_kind(self, require_time=None):
         """Return dependencies grouped by data kind
         i.e. {kind1: [dep0, dep1], kind2: [dep, dep]}
-        :param require_time: If True (default), one dependency of each kind
+        :param require_time: If True, one dependency of each kind
         must provide time information. It will be put first in the list.
+
+        If require_time is omitted, we will require time only if there is
+        more than one data kind in the dependencies.
         """
+        if require_time is None:
+            require_time = \
+                len(self.dependencies_by_kind(require_time=False)) > 1
+
         deps_by_kind = dict()
         key_deps = []
         for d in self.depends_on:
-            p = provider(d)
-
-            k = p.data_kind
+            k = self.deps[d].data_kind
             deps_by_kind.setdefault(k, [])
 
             # If this has time information, put it first in the list
-            if require_time and 'time' in p.dtype.names:
+            if (require_time
+                    and 'time' in self.deps[d].dtype.names):
                 key_deps.append(d)
                 deps_by_kind[k].insert(0, d)
             else:
@@ -126,110 +119,153 @@ class StraxPlugin:
         if require_time:
             for k, d in deps_by_kind.items():
                 if not d[0] in key_deps:
-                    raise ValueError(f"No dependency of data kind {k} "
+                    raise ValueError(f"For {self.__class__.__name__}, no "
+                                     f"dependency of data kind {k} "
                                      "has time information!")
 
         return deps_by_kind
 
-    def iter(self, data_dir, n_per_iter=None):
-        """Yield result chunks for processing input_dir
-        :param n_per_iter: pass at most this many rows to compute
+    def iter(self, iters, executor=None):
+        """Iterate over dependencies and yield results
+        :param iters: dict with iterators over dependencies
+        :param executor: Executor to punt computation tasks to.
+            If None, will compute inside the plugin's thread.
         """
         deps_by_kind = self.dependencies_by_kind()
-        iters = {d: provider(d).get(data_dir)
-                 for d in self.depends_on}
-
-        if n_per_iter is not None:
-            # Apply additional flow control
-            for kind, deps in deps_by_kind.items():
-                d = deps[0]
-                iters[d] = ca.fixed_length_chunks(iters[d], n=n_per_iter)
-                break
 
         if len(deps_by_kind) > 1:
             # Sync the iterators that provide time info for each data kind
             # (first in deps_by_kind lists) by endtime
-            iters.update(ca.sync_iters(
-                partial(ca.same_stop, func=strax.endtime),
+            iters.update(strax.sync_iters(
+                partial(strax.same_stop, func=strax.endtime),
                 {d[0]: iters[d[0]]
                  for d in deps_by_kind.values()}))
 
-        # Sync the iterators of each data_kind to provide same-length chunks
-        for deps in deps_by_kind.values():
-            iters.update(ca.sync_iters(
-                ca.same_length,
-                {d: iters[d] for d in deps}))
+        # Convert to iterators over merged data for each kind
+        new_iters = dict()
+        for kind, deps in deps_by_kind.items():
+            if len(deps) > 1:
+                synced_iters = strax.sync_iters(
+                    strax.same_length,
+                    {d: iters[d] for d in deps})
+                new_iters[kind] = strax.merge_iters(synced_iters.values())
+            else:
+                new_iters[kind] = iters[deps[0]]
+        iters = new_iters
 
-        while True:
+        if self.rechunk_input:
+            iters = self.rechunk_input(iters)
+
+        pending = []
+        for chunk_i in itertools.count():
             try:
-                yield self.compute(**{d: next(iters[d])
-                                      for d in self.depends_on})
+                if not self.check_next_ready_or_done(chunk_i):
+                    # TODO: avoid duplication
+                    # but also remain picklable...
+                    self.close(wait_for=tuple(pending))
+                    return
+                compute_kwargs = {k: next(iters[k])
+                                  for k in deps_by_kind}
             except StopIteration:
+                self.close(wait_for=tuple(pending))
                 return
+            except Exception:
+                self.close(wait_for=tuple(pending))
+                raise
 
-    def process_and_slurp(self, input_dir, **kwargs):
-        """Return results for processing data_dir"""
-        return np.concatenate(list(self.iter(input_dir, **kwargs)))
+            if self.parallel and executor is not None:
+                new_f = executor.submit(self.do_compute,
+                                        chunk_i=chunk_i,
+                                        **compute_kwargs)
+                pending = [f for f in pending + [new_f]
+                           if not f.done()]
+                yield new_f
+            else:
+                yield self.do_compute(chunk_i=chunk_i, **compute_kwargs)
 
-    def save(self, input_dir, output_dir=None, chunk_size=int(5e7), **kwargs):
-        """Process data_dir and save the results there"""
-        if output_dir is None:
-            output_dir = input_dir
-        out_dir = os.path.join(output_dir, self.provides)
+    def do_compute(self, *args, chunk_i=None, **kwargs):
+        for i, x in enumerate(args):
+            kwargs[self.depends_on[i]] = x
 
-        it = self.iter(input_dir, **kwargs)
-        it = strax.chunk_arrays.fixed_size_chunks(it, chunk_size)
-        strax.io_chunked.save_to_dir(it, out_dir, compressor=self.compressor)
+        if self.compute_takes_chunk_i:
+            result = self.compute(**kwargs, chunk_i=chunk_i)
+        else:
+            result = self.compute(**kwargs)
+
+        if isinstance(result, dict):
+            if not len(result):
+                # TODO: alt way of getting length?
+                raise RuntimeError("if returning dict, must have a key")
+            some_key = list(result.keys())[0]
+            n = len(result[some_key])
+            r = np.zeros(n, dtype=self.dtype)
+            for k, v in result.items():
+                r[k] = v
+            result = r
+
+        for p in self.post_compute:
+            r = p(result, chunk_i=chunk_i)
+            if r is not None:
+                result = r
+
+        return result
+
+    def check_next_ready_or_done(self, chunk_i):
+        return True
+
+    def close(self, wait_for=tuple(), timeout=120):
+        done, not_done = wait(wait_for, timeout=timeout)
+        if len(not_done):
+            raise RuntimeError(
+                f"{len(not_done)} futures of {self.__class__.__name__}"
+                "did not complete in time!")
+        for x in self.on_close:
+            x()
 
     def compute(self, **kwargs):
         raise NotImplementedError
-
-
-def camel_to_snake(x):
-    """Convert x from CamelCase to snake_case"""
-    # From https://stackoverflow.com/questions/1175208
-    x = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', x)
-    return re.sub('([a-z0-9])([A-Z])', r'\1_\2', x).lower()
-
 
 ##
 # Special plugins
 ##
 
-class LoopPlugin(StraxPlugin):
+
+@export
+class LoopPlugin(Plugin):
     """Plugin that disguises multi-kind data-iteration by an event loop
     """
-
-    def __init__(self):
-        if not hasattr(self, 'depends_on'):
-            raise ValueError('depends_on is mandatory for LoopPlugin')
-
-        # Data kind to look over is set by first dependency
-        self.loop_over = provider(self.depends_on[0]).data_kind
-
-        super().__init__()
-
     def compute(self, **kwargs):
-        # Merge data of each data kind
-        deps_by_kind = self.dependencies_by_kind()
-        things_by_kind = {
-            k: strax.merge_arrs([kwargs[d] for d in deps])
-            for k, deps in deps_by_kind.items()
-        }
+        # If not otherwise specified, data kind to loop over
+        # is that of the first dependency (e.g. events)
+        # Can't be in __init__: deps not initialized then
+        if hasattr(self, 'loop_over'):
+            loop_over = self.loop_over
+        else:
+            loop_over = self.deps[self.depends_on[0]].data_kind
 
         # Group into lists of things (e.g. peaks)
         # contained in the base things (e.g. events)
-        base = things_by_kind[self.loop_over]
-        for k, things in things_by_kind.items():
-            if k != self.loop_over:
-                things_by_kind[k] = strax.split_by_containment(things, base)
+        base = kwargs[loop_over]
+        if len(base) > 1:
+            assert np.all(base[1:]['time'] >= strax.endtime(base[:-1])), \
+                f'{base}s overlap'
+
+        for k, things in kwargs.items():
+            if len(things) > 1:
+                assert np.diff(things['time']).min() > 0, f'{k} not sorted'
+            if k != loop_over:
+                r = strax.split_by_containment(things, base)
+                if len(r) != len(base):
+                    raise RuntimeError(f"Split {k} into {len(r)}, "
+                                       f"should be {len(base)}!")
+                kwargs[k] = r
 
         results = np.zeros(len(base), dtype=self.dtype)
         for i in range(len(base)):
             r = self.compute_loop(base[i],
-                                  **{k: things_by_kind[k][i]
-                                     for k in deps_by_kind
-                                     if k != self.loop_over})
+                                  **{k: kwargs[k][i]
+                                     for k in self.dependencies_by_kind()
+                                     if k != loop_over})
 
             # Convert from dict to array row:
             for k, v in r.items():
@@ -237,50 +273,25 @@ class LoopPlugin(StraxPlugin):
 
         return results
 
-    def compute_loop(self, base, **kwargs):
-        raise ValueError
+    def compute_loop(self, *args, **kwargs):
+        raise NotImplementedError
 
 
-class MergePlugin(StraxPlugin):
+@export
+class MergeOnlyPlugin(Plugin):
     """Plugin that merges data from its dependencies
     """
+    save_when = SaveWhen.EXPLICIT
 
-    def __init__(self):
-        if not hasattr(self, 'depends_on'):
-            raise ValueError('depends_on is mandatory for MergePlugin')
-
+    def infer_dtype(self):
         deps_by_kind = self.dependencies_by_kind()
         if len(deps_by_kind) != 1:
-            raise ValueError("MergePlugins can only merge data of the same "
-                             "kind, but got multiple kinds: "
+            raise ValueError("MergeOnlyPlugins can only merge data "
+                             "of the same kind, but got multiple kinds: "
                              + str(deps_by_kind))
 
-        for k in deps_by_kind:
-            self.data_kind = k
-            # No break needed, there's just one item
-
-        self.dtype = sum([strax.unpack_dtype(provider(d).dtype)
-                          for d in self.depends_on], [])
-
-        super().__init__()
+        return strax.merged_dtype([self.deps[d].dtype
+                                   for d in self.depends_on])
 
     def compute(self, **kwargs):
-        return strax.merge_arrs(list(kwargs.values()))
-
-
-class PlaceholderPlugin(StraxPlugin):
-    """Plugin that throws NotImplementedError when asked to compute anything"""
-    depends_on = tuple()
-
-    def compute(self):
-        raise NotImplementedError("No plugin registered that "
-                                  f"provides {self.provides}")
-
-
-@register_plugin
-class Records(PlaceholderPlugin):
-    """Placeholder plugin for something (e.g. a DAQ or simulator) that
-    provides strax records.
-    """
-    data_kind = 'records'
-    dtype = strax.record_dtype()
+        return kwargs[list(kwargs.keys())[0]]

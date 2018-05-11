@@ -1,12 +1,14 @@
+import contextlib
+from functools import wraps
+import re
+import typing
+from hashlib import sha1
+import pickle
+
 import numpy as np
 import numba
 import dill
-from functools import wraps
 
-__all__ = ('records_needed', 'growing_result', 'sort_by_time',
-           'first_index_not_below', 'endtime',
-           'fully_contained_in', 'split_by_containment',
-           'unpack_dtype', 'merge_arrs')
 
 # Change numba's caching backend from pickle to dill
 # I'm sure they don't mind...
@@ -14,11 +16,31 @@ __all__ = ('records_needed', 'growing_result', 'sort_by_time',
 numba.caching.pickle = dill
 
 
+def exporter(export_self=False):
+    """Export utility modified from https://stackoverflow.com/a/41895194
+    Returns export decorator, __all__ list
+    """
+    all_ = []
+    if export_self:
+        all_.append('exporter')
+
+    def decorator(obj):
+        all_.append(obj.__name__)
+        return obj
+
+    return decorator, all_
+
+
+export, __all__ = exporter(export_self=True)
+
+
+@export
 def records_needed(pulse_length, samples_per_record):
     """Return records needed to store pulse_length samples"""
     return 1 + (pulse_length - 1) // samples_per_record
 
 
+@export
 def growing_result(dtype=np.int, chunk_size=10000):
     """Decorator factory for functions that fill numpy arrays
     Functions must obey following API:
@@ -63,98 +85,7 @@ def growing_result(dtype=np.int, chunk_size=10000):
     return _growing_result
 
 
-# (5-10x) faster than np.sort(order=...), as np.sort looks at all fields
-# TODO: maybe this should be a factory?
-@numba.jit(nopython=True, nogil=True, cache=True)
-def sort_by_time(x):
-    """Sort pulses by time, then channel.
-
-    Assumes you have no more than 10k channels, and records don't span
-    more than 100 days. TODO: FIX this
-    """
-    # I couldn't get fast argsort on multiple keys to work in numba
-    # So, let's make a single key...
-    sort_key = (x['time'] - x['time'].min()) * 10000 + x['channel']
-    sort_i = np.argsort(sort_key)
-    return x[sort_i]
-
-
-@numba.jit(nopython=True, nogil=True, cache=True)
-def first_index_not_below(arr, t):
-    """Return first index of array >= t, or len(arr) if no such found"""
-    for i, x in enumerate(arr):
-        if x >= t:
-            return i
-    return len(arr)
-
-
-def endtime(x):
-    """Return endtime of intervals x"""
-    if 'endtime' in x.dtype.names:
-        return x['endtime']
-    return x['time'] + x['length'] * x['dt']
-
-
-def fully_contained_in(things, containers):
-    """Return array of len(things) with index of interval in containers
-    for which things are fully contained in a container, or -1 if no such
-    exists. We assume all intervals are sorted by time, and b_intervals
-    nonoverlapping.
-    """
-    result = np.ones(len(things), dtype=np.int32) * -1
-    a_starts = things['time']
-    b_starts = containers['time']
-    a_ends = endtime(things)
-    b_ends = endtime(containers)
-    _fc_in(a_starts, b_starts, a_ends, b_ends, result)
-    return result
-
-
-@numba.jit(nopython=True, nogil=True, cache=True)
-def _fc_in(a_starts, b_starts, a_ends, b_ends, result):
-    b_i = 0
-    for a_i in range(len(a_starts)):
-        # Skip ahead one or more b's if we're beyond them
-        # Note <= in second condition: end is an exclusive bound
-        while b_i < len(b_starts) and b_ends[b_i] <= a_starts[a_i]:
-            b_i += 1
-        if b_i == len(b_starts):
-            break
-
-        # Check for containment. We only need to check one b, since bs
-        # are nonoverlapping
-        if b_starts[b_i] <= a_starts[a_i] and a_ends[a_i] <= b_ends[b_i]:
-            result[a_i] = b_i
-
-
-def split_by_containment(things, containers):
-    """Return list of thing-arrays contained in each container
-
-    Assumes everything is sorted, and containers are nonoverlapping
-    TODO: needs tests!
-    """
-    if not len(containers):
-        return []
-
-    which_container = fully_contained_in(things, containers)
-
-    mask = which_container != -1
-    things = things[mask]
-    which_container = which_container[mask]
-    things_split = np.split(
-        things,
-        np.where(np.diff(which_container))[0] + 1)
-
-    # Insert empties for containers with nothing
-    for c in np.setdiff1d(np.arange(len(containers)),
-                          np.unique(which_container)):
-        if c == 0:
-            continue   # np.split already produces an empty in this case?
-        things_split.insert(c, things[:0])
-
-    return things_split
-
-
+@export
 def unpack_dtype(dtype):
     """Return list of tuples needed to construct the dtype
 
@@ -176,15 +107,99 @@ def unpack_dtype(dtype):
     return result
 
 
+@export
+def merged_dtype(dtypes):
+    result = {}
+    for x in dtypes:
+        for unpacked_dtype in unpack_dtype(x):
+            field_name = unpacked_dtype[0]
+            if isinstance(field_name, tuple):
+                field_name = field_name[0]
+
+            if field_name in result:
+                # Name collision
+                continue
+
+            result[field_name] = unpacked_dtype
+
+    return list(result.values())
+
+
+@export
 def merge_arrs(arrs):
-    """Merge structured arrays of equal length. Assumes no field collisions.
+    """Merge structured arrays of equal length.
+
+    On field name collisions, data from later arrays is kept.
     """
+    # Much faster than the similar function in numpy.lib.recfunctions
+
     n = len(arrs[0])
-    if not all(np.array([len(x) for x in arrs]) == n):
+    if not all([len(x) == n for x in arrs]):
         raise ValueError("Arrays must all have the same length")
-    result_dtype = sum([unpack_dtype(x.dtype) for x in arrs], [])
-    result = np.zeros(n, dtype=result_dtype)
+
+    result = np.zeros(n, dtype=merged_dtype([x.dtype for x in arrs]))
     for arr in arrs:
         for fn in arr.dtype.names:
             result[fn] = arr[fn]
     return result
+
+
+@export
+def camel_to_snake(x):
+    """Convert x from CamelCase to snake_case"""
+    # From https://stackoverflow.com/questions/1175208
+    x = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', x)
+    return re.sub('([a-z0-9])([A-Z])', r'\1_\2', x).lower()
+
+
+@export
+@contextlib.contextmanager
+def profile_threaded(filename):
+    import yappi            # noqa   # yappi is not a dependency
+    if filename is None:
+        yield
+        return
+
+    yappi.start()
+    yield
+    yappi.stop()
+    p = yappi.get_func_stats()
+    p = yappi.convert2pstats(p)
+    p.dump_stats(filename)
+    yappi.clear_stats()
+
+
+@export
+def to_str_tuple(x) -> typing.Tuple[str]:
+    if isinstance(x, str):
+        return x,
+    elif isinstance(x, list):
+        return tuple(x)
+    return x
+
+
+@export
+def hashablize(obj):
+    """Convert a container hierarchy into one that can be hashed.
+    See http://stackoverflow.com/questions/985294
+    """
+    try:
+        hash(obj)
+    except TypeError:
+        if isinstance(obj, dict):
+            return tuple((k, hashablize(v)) for (k, v) in sorted(obj.items()))
+        elif isinstance(obj, np.ndarray):
+            return tuple(obj.tolist())
+        elif hasattr(obj, '__iter__'):
+            return tuple(hashablize(o) for o in obj)
+        else:
+            raise TypeError("Can't hashablize object of type %r" % type(obj))
+    else:
+        return obj
+
+
+@export
+def deterministic_hash(thing):
+    """Return a deterministic hash of a container hierarchy using hashablize,
+    pickle and sha1"""
+    return sha1(pickle.dumps(hashablize(thing))).hexdigest()

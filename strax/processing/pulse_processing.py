@@ -4,15 +4,14 @@
 import numpy as np
 import numba
 
-from strax import utils
-from strax.dtypes import hit_dtype
-
-__all__ = 'baseline integrate find_hits'.split()
+import strax
+export, __all__ = strax.exporter()
 
 # Constant for use in record_links, to indicate there is no prev/next record
 NOT_APPLICABLE = -1
 
 
+@export
 @numba.jit(nopython=True, nogil=True, cache=True)
 def baseline(records, baseline_samples=40):
     """Subtract pulses from int(baseline), store baseline in baseline field
@@ -48,12 +47,14 @@ def baseline(records, baseline_samples=40):
         d.baseline = bl
 
 
+@export
 @numba.jit(nopython=True, nogil=True, cache=True)
 def integrate(records):
     for i, r in enumerate(records):
         records[i]['area'] = r['data'].sum()
 
 
+@export
 @numba.jit(nopython=True, nogil=True, cache=True)
 def record_links(records):
     """Return (prev_r, next_r), each arrays of indices of previous/next
@@ -97,11 +98,14 @@ def record_links(records):
 # else copying buffers / switching context dominates over actual computation
 # No max_duration argument: hits terminate at record boundaries, and
 # anyone insane enough to try O(sec) long records deserves to be punished
-@utils.growing_result(hit_dtype, chunk_size=int(1e4))
+@export
+@strax.growing_result(strax.hit_dtype, chunk_size=int(1e4))
 @numba.jit(nopython=True, nogil=True, cache=True)
 def find_hits(records, threshold=15, _result_buffer=None):
     """Return hits (intervals above threshold) found in records.
     Hits that straddle record boundaries are split (TODO: fix this?)
+
+    NB: returned hits are NOT sorted yet!
     """
     buffer = _result_buffer
     if not len(records):
