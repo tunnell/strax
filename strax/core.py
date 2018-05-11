@@ -418,8 +418,8 @@ class Context:
                 raise RuntimeError("Cannot automerge different data kinds!")
 
         components = self.get_components(run_id, targets=targets, save=save)
-        yield from strax.ThreadedMailboxProcessor(
-            components, max_workers=max_workers).iter()
+        yield from strax.ThreadedMailboxProcessor(components,
+                                                  max_workers=max_workers).iter()
 
     def make(self, *args, **kwargs) -> None:
         """Compute target for run_id (return nothing)

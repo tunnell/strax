@@ -47,8 +47,7 @@ class MongoStore(Store):
         raise NotCached
 
     def _read_chunk(self, coll_name, chunk_info, dtype, compressor):
-        docs = list(self.db[coll_name].find(
-            {'_chunk_i': chunk_info['chunk_i']}))
+        docs = list(self.db[coll_name].find({'_chunk_i': chunk_info['chunk_i']}))
 
         result = np.zeros(len(docs), dtype=dtype)
         for i, d in enumerate(docs):
