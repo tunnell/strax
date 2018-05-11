@@ -1,12 +1,17 @@
-try:
-    from setuptools import setup
-except ImportError:
-    from distutils.core import setup
+from setuptools import setup
 
 # Get requirements from requirements.txt, stripping the version tags
-with open('requirements.txt') as f:
-    requires = [x.strip().split('=')[0]
-                for x in f.readlines()]
+def parse_requirements(filename):
+    f = open(filename, 'r')
+    return [x.strip().split('=')[0] for x in f.readlines()]
+
+extras_require = {
+    'sql': parse_requirements('requirements/sql.txt'),
+    'mongo' : parse_requirements('requirements/mongo.txt'),  
+}
+extras_require['complete'] = sorted(set(sum(extras_require.values(), [])))
+
+requires = parse_requirements('requirements.txt')
 
 with open('README.md') as file:
     long_description = file.read()
@@ -14,14 +19,13 @@ with open('README.md') as file:
 setup(name='strax',
       version='0.1.2',
       description='Streaming analysis for XENON',
-      author='Jelle Aalbers',
-      author_email='j.aalbers@uva.nl',
+      maintainer='Jelle Aalbers',
+      maintainer_email='j.aalbers@uva.nl',
       url='https://github.com/jelleaalbers/strax',
       setup_requires=['pytest-runner'],
       install_requires=requires,
-      tests_require=requires + ['pytest',
-                                'boltons',
-                                'hypothesis'],
+      tests_require=requires + parse_requirements('requirements/test.txt'),
+      extras_require=extras_require,
       long_description=long_description,
       long_description_content_type="text/markdown",
       packages=['strax',

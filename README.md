@@ -38,13 +38,15 @@ Documentation is under construction. For the moment, you might find these useful
 ### Installation
 To install the latest stable version (from pypi), run `pip install strax`. 
 Dependencies should install automatically: 
-numpy, pandas, numba, two compression libraries (blosc and zstd
+numpy, pandas, numba, two compression libraries (blosc and zstd)
 and a few miscellaneous pure-python packages.
+
+To install extra extensions, do e.g. `pip install -e .[mongo]` or for all extensions `pip install -e .[complete]`
 
 You can also clone the repository, then setup a developer installation with `python setup.py develop`.
 
 If you experience problems during installation, try installing 
-exactly the same version of the dependencies as used on he Travis build test server. 
+exactly the same version of the dependencies as used on the Travis build test server. 
 Clone the repository, then do `pip install -r requirements.txt`.
 
 #### Test data
